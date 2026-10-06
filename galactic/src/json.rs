@@ -10,7 +10,13 @@ pub fn esc(s: &str) -> String {
         match ch {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
+            // json.dumps emits the short form for these five and
+            // \u00xx for every other control character.
             '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
             c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
             c => out.push(c),
         }
@@ -53,9 +59,24 @@ pub fn pretty(r: &Report) -> String {
     compact.push_str(&format!(",\"fingerprint\":\"{}\"}}", esc(&r.fingerprint)));
     let mut out = String::with_capacity(compact.len() * 2);
     let mut depth = 0usize;
-    let mut chars = compact.chars().peekable();
-    while let Some(c) = chars.next() {
+    let mut in_string = false;
+    let mut escaped = false;
+    for c in compact.chars() {
+        if in_string {
+            out.push(c);
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, '"') => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
         match c {
+            '"' => {
+                in_string = true;
+                out.push(c);
+            }
             '{' | '[' => {
                 out.push(c);
                 depth += 1;
@@ -63,7 +84,7 @@ pub fn pretty(r: &Report) -> String {
                 out.push_str(&"  ".repeat(depth));
             }
             '}' | ']' => {
-                depth -= 1;
+                depth = depth.saturating_sub(1);
                 out.push('\n');
                 out.push_str(&"  ".repeat(depth));
                 out.push(c);

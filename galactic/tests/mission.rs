@@ -86,6 +86,80 @@ fn cli_json_and_exit_codes() {
 }
 
 #[test]
+fn json_mode_exit_code_tracks_reachability() {
+    let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    // GUIDE.md: exit code is 0 for a completed mission, 2 for an
+    // unreachable one. --json selects an output format; it does not
+    // change the outcome of the mission.
+    let (out, code) = run(&args(&["--json", "--jump", "0.001"])).unwrap();
+    assert_eq!(code, 2, "unreachable mission must exit 2 in --json mode");
+    assert!(out.contains("\"route\": null"));
+    let (_, code) = run(&args(&["--json", "--jump", "150"])).unwrap();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn json_escapes_match_python_dumps() {
+    let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    // json.rs documents that it matches json.dumps. Python emits the
+    // short escape for backspace, tab, newline, form feed and carriage
+    // return, and \u00xx for every other control character.
+    let seed = "a\tb\rc\u{8}d\u{c}e";
+    let (out, _) = run(&args(&["--json", "--seed", seed, "--jump", "150"])).unwrap();
+    assert!(
+        out.contains("a\\tb\\rc\\bd\\fe"),
+        "control characters must use the short escapes: {}",
+        out.lines().find(|l| l.contains("seed")).unwrap_or("")
+    );
+    assert!(!out.contains("\\u0009"));
+
+    // A control character with no short form keeps \u00xx.
+    let (out, _) = run(&args(&["--json", "--seed", "\u{1}", "--jump", "150"])).unwrap();
+    assert!(out.contains("\\u0001"));
+}
+
+#[test]
+fn json_pretty_keeps_structure_chars_inside_strings() {
+    let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    // A seed may contain any character, including JSON structure
+    // characters. They are legal inside a string literal and must not
+    // be treated as structure by the pretty-printer.
+    let seed = "a,b:c{d}e[f]g";
+    let (out, _) = run(&args(&["--json", "--seed", seed, "--jump", "150"])).unwrap();
+    assert!(out.lines().any(|l| l == format!("  \"seed\": \"{}\",", seed)));
+    // Braces must stay balanced across the whole document.
+    let opens = out.chars().filter(|c| *c == '{').count();
+    let closes = out.chars().filter(|c| *c == '}').count();
+    assert_eq!(opens, closes);
+}
+
+#[test]
+fn json_pretty_survives_unbalanced_seed() {
+    let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    // A closing brace inside a string used to drive the indent depth
+    // below zero, panicking in debug builds and allocating wildly in
+    // release builds.
+    for seed in ["}", "]", "}{", "\"quote\"", "\\"] {
+        let (out, _) = run(&args(&["--json", "--seed", seed, "--jump", "150"])).unwrap();
+        assert!(out.contains("\"seed\":"));
+    }
+}
+
+#[test]
+fn help_flag_prints_usage_and_exits_zero() {
+    let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    for flag in ["--help", "-h"] {
+        let (out, code) = run(&args(&[flag])).unwrap();
+        assert_eq!(code, 0, "{} must exit 0", flag);
+        assert!(out.contains("--seed"), "usage must list options: {}", out);
+        assert!(out.contains("--json"), "usage must list options: {}", out);
+    }
+    // Asking for help is never an error, even next to a bad argument.
+    let (_, code) = run(&args(&["--bogus", "--help"])).unwrap();
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn cli_invalid_input() {
     let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     assert!(run(&args(&["--stars", "1"])).is_err());
