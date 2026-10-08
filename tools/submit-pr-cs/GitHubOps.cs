@@ -9,8 +9,10 @@ public static class GitHubOps
     public static string HeadSpec(string target, string fork, string branch) =>
         fork == target ? branch : $"{fork.Split('/')[0]}:{branch}";
 
-    // push 幂等（同分支同内容），按"常规→直连→常规"退避重试兜底代理抖动
-    public static void PushBranch(string fork, string branch, string wt, bool force)
+    // push 幂等（同分支同内容），按"常规→直连→常规"退避重试兜底代理抖动。
+    // onRetry: GUI 用的降级/重试上报（i 从 1 起）。
+    public static void PushBranch(string fork, string branch, string wt, bool force,
+        Action<int, string>? onRetry = null)
     {
         string[][] variants = { Array.Empty<string>(),
             new[] { "-c", "http.proxy=", "-c", "https.proxy=" }, Array.Empty<string>() };
@@ -31,6 +33,7 @@ public static class GitHubOps
                 if (i == variants.Length - 1) throw;
                 Console.WriteLine($"[{branch}] push 失败，{5 * (i + 1)}s 后重试 " +
                                   $"({i + 1}/{variants.Length})…: {LastLine(e.Message)}");
+                onRetry?.Invoke(i + 1, LastLine(e.Message));
                 Thread.Sleep(5000 * (i + 1));
             }
         }
@@ -101,6 +104,23 @@ public static class GitHubOps
     public static string PrState(string target, int pr) =>
         JsonDocument.Parse(GitOps.Gh("pr", "view", pr.ToString(), "--repo", target,
             "--json", "state")).RootElement.GetProperty("state").GetString()!;
+
+    // 轮询热路径对瞬时 API 抖动容错: 每 15s 一次 × 多单元并发，
+    // 一次 5xx/限流就把整条渐进链中止太伤——连续 3 次失败才上抛。
+    public static string PrStateTolerant(string target, int pr)
+    {
+        OpException? last = null;
+        for (int i = 1; i <= 3; i++)
+        {
+            try { return PrState(target, pr); }
+            catch (OpException e)
+            {
+                last = e;
+                Thread.Sleep(5000 * i);
+            }
+        }
+        throw last!;
+    }
 
     public static string LastComment(string target, int pr)
     {
